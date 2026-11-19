@@ -31,6 +31,7 @@ Run:
         --reference_csv db_embeddings/an37740_drp2_200v_reference_embeddings.csv \
         --out data/AN-37740/step_2/an37740_best_match_drp2_200v.csv
 """
+import os
 import csv
 import pickle
 import logging
@@ -151,6 +152,10 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
                 "best_similarity": round(best_similarity, 6),
             }
         )
+
+    out_dir = os.path.dirname(out_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(
