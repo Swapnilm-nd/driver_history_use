@@ -1,0 +1,8 @@
+pandas>=1.3
+
+# coverage.py, backtest.py, precision.py and everything under scripts/ also need the
+# FaceRecognition repo itself importable (frs_src, offline_scripts), plus whatever DB/AWS
+# credentials that repo's own offline_scripts require. Install it in this environment with:
+#   pip install -e /Users/swapnilmane/NetraDyne/FaceRecognition/.claude/worktrees/system-design-implementation-62aaf6
+#
+# src/an37739/candidate_set.py and tests/ need nothing beyond this file and the stdlib.
