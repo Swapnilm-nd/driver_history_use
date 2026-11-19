@@ -1,6 +1,8 @@
 """
-AN-37740 Step 2: compare each sampled -1 image's embedding against its vehicle's candidate
-drivers' reference embeddings, keep the best match + its similarity score.
+AN-37740 Step 2: compare each sampled -1 image's embedding against every cluster of its
+vehicle's candidate drivers, keeping every (image, driver, cluster) pairing's similarity -
+not just the best one per image - so later analysis (ambiguity checks, re-thresholding) can
+be done without rerunning this comparison.
 
 Pure numpy over already-computed data (no model weights, no frs_src needed) - unlike the
 embedding-generation script, this can run anywhere the three inputs below are present.
@@ -16,10 +18,10 @@ Inputs:
                      driver is compared, not just one representative embedding per driver.
                      embedding is a Postgres array literal, e.g. "{0.1,0.2,...}"
 
-Output: a CSV - one row per image that had a real embedding (detection didn't fail) AND had
-at least one candidate driver for its vehicle: image_id, tenant_id, vehicle_id,
-num_candidate_drivers, num_clusters_compared, best_driver_id, best_cluster_id,
-best_similarity (cosine, the best across every cluster of every candidate).
+Output: a CSV - one row per (image, candidate driver, candidate cluster) pairing, for every
+image that had a real embedding AND at least one candidate driver with a reference embedding:
+image_id, tenant_id, vehicle_id, driver_id, cluster_id, similarity (cosine), is_best (True for
+exactly one row per image - whichever pairing had the highest similarity for that image).
 
 Similarity metric: cosine similarity, matching cfg.ARCFACE.cosine_similarity_threshold (0.53)
 in frs_src/config.py - "the current value" the ticket's threshold sweep starts from.
@@ -105,6 +107,7 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
     n_no_embedding = 0
     n_no_candidates = 0
     n_no_reference = 0
+    n_images_compared = 0
 
     for row in image_rows:
         if row["embedding"] is None:
@@ -118,40 +121,33 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
             continue
 
         image_emb = np.array(row["embedding"], dtype=np.float32)
-        best_driver_id = None
-        best_cluster_id = None
-        best_similarity = None
-        n_candidate_drivers_with_reference = 0
-        n_clusters_compared = 0
+        pairings = []  # every (driver_id, cluster_id, similarity) for this image
         for driver_id in driver_ids:
             driver_clusters = references.get(driver_id)
             if not driver_clusters:
                 continue
-            n_candidate_drivers_with_reference += 1
             for cluster_id, ref_emb in driver_clusters:
-                n_clusters_compared += 1
                 similarity = cosine_similarity(image_emb, ref_emb)
-                if best_similarity is None or similarity > best_similarity:
-                    best_similarity = similarity
-                    best_driver_id = driver_id
-                    best_cluster_id = cluster_id
+                pairings.append((driver_id, cluster_id, similarity))
 
-        if n_clusters_compared == 0:
+        if not pairings:
             n_no_reference += 1
             continue
 
-        output.append(
-            {
-                "image_id": row["image_id"],
-                "tenant_id": row["tenant_id"],
-                "vehicle_id": row["vehicle_id"],
-                "num_candidate_drivers": n_candidate_drivers_with_reference,
-                "num_clusters_compared": n_clusters_compared,
-                "best_driver_id": best_driver_id,
-                "best_cluster_id": best_cluster_id,
-                "best_similarity": round(best_similarity, 6),
-            }
-        )
+        n_images_compared += 1
+        best_similarity = max(p[2] for p in pairings)
+        for driver_id, cluster_id, similarity in pairings:
+            output.append(
+                {
+                    "image_id": row["image_id"],
+                    "tenant_id": row["tenant_id"],
+                    "vehicle_id": row["vehicle_id"],
+                    "driver_id": driver_id,
+                    "cluster_id": cluster_id,
+                    "similarity": round(similarity, 6),
+                    "is_best": similarity == best_similarity,
+                }
+            )
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
@@ -164,20 +160,20 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
                 "image_id",
                 "tenant_id",
                 "vehicle_id",
-                "num_candidate_drivers",
-                "num_clusters_compared",
-                "best_driver_id",
-                "best_cluster_id",
-                "best_similarity",
+                "driver_id",
+                "cluster_id",
+                "similarity",
+                "is_best",
             ],
         )
         writer.writeheader()
         writer.writerows(output)
 
     logger.info(
-        "wrote %s rows to %s (skipped: %s no embedding, %s no candidates for vehicle, "
-        "%s candidates had no reference embedding)",
+        "wrote %s pairing rows (%s images compared) to %s (skipped: %s no embedding, "
+        "%s no candidates for vehicle, %s candidates had no reference embedding)",
         len(output),
+        n_images_compared,
         out_path,
         n_no_embedding,
         n_no_candidates,
