@@ -238,6 +238,67 @@ Next: move this CSV to the instance and generate embeddings, same as drp=1.
 
 ---
 
+## Step 2 (drp=2, 200 vehicles): Candidate Drivers, Reference Embeddings (Every Cluster), Comparison
+
+**Task:** For the 199 vehicles that actually had a -1 image, pull every candidate driver AND
+every one of their clusters (not just one representative per driver - the gap caught before
+restarting), fetch each cluster's centroid embedding, and compare against every sampled
+image's embedding.
+
+**DB Used:** FRS (candidate drivers + reference embeddings). **Run location (comparison):**
+local Mac or instance, pure numpy - no model weights needed, unlike embedding generation.
+
+**Tables Used:** `vehicle_cluster_history`, `cluster_details`, `training_image_details`
+
+**Commands used:**
+
+Candidate drivers per vehicle, scoped to the exact 199 vehicles (not re-derived via `LIMIT`,
+which isn't deterministic without `ORDER BY` - pulled straight from the already-fetched image
+CSV instead): `data/AN-37740/step_1/an37740_drp2_200vehicles_candidate_drivers_export.sql`.
+
+Reference embeddings - every cluster per candidate driver, stored outside git in
+`db_embeddings/` (gitignored, moved to the instance via `aws s3 cp`, not git, since these can
+get large): `data/AN-37740/step_1/an37740_drp2_200vehicles_reference_embeddings_export.sql`.
+
+Comparison (`scripts/an37740_compare_embeddings.py`, updated to compare against every cluster
+of every candidate driver, not one representative embedding per driver):
+```bash
+python scripts/an37740_compare_embeddings.py \
+    --embeddings_pkl data/AN-37740/step_1/an37740_embeddings_drp2_200vehicles.pkl \
+    --candidates_csv data/AN-37740/step_1/an37740_drp2_200v_candidate_drivers.csv \
+    --reference_csv db_embeddings/an37740_drp2_200v_reference_embeddings.csv \
+    --out data/AN-37740/step_2/an37740_best_match_drp2_200v.csv
+```
+
+**Output Table:**
+
+| | Count |
+|---|---|
+| Candidate drivers (distinct) | 210 |
+| Total clusters across those drivers | 432 (vs. 210 if only one cluster/driver had been kept) |
+| (vehicle, driver) candidate pairs | 281 |
+| Total images | 46,912 |
+| Skipped - no embedding (detection failed) | 14,003 (29.9%) |
+| Skipped - no candidate for vehicle | 0 |
+| Skipped - candidate had no reference embedding | 0 |
+| **Compared against >=1 cluster** | **32,909 (70.1%)** |
+
+**Observation:** Pre-filtering to only "has-candidate" vehicles before fetching anything (the
+fix applied after the earlier fleet-wide pass found 44.8% of embedded images had zero
+candidates) eliminates that entire failure mode here - 0 images skipped for lacking a
+candidate, versus the pre-restart pass where it was the single largest loss. The only ceiling
+remaining in this scoped pass is face detection (29.9%) - a cleaner, more interpretable result
+than the fleet-wide pass's two-stacked-ceilings picture. Also confirms the earlier concern was
+real: 432 total clusters vs. 210 if the old one-cluster-per-driver approach had been kept -
+roughly double the reference data is now actually being used.
+
+Next: use the `best_similarity` column (cosine similarity, one row per compared image) to run
+the actual threshold sweep - for various thresholds below the current value
+(`cfg.ARCFACE.cosine_similarity_threshold = 0.53`), how many images would newly match
+(coverage/gain) at each one.
+
+---
+
 ## Still to do
 
 - Unassigned-image count for drp=2 (week W=45), then fetch + embeddings.
