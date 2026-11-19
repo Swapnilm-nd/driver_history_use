@@ -1,1 +1,3 @@
 data/AN-37740/step_2/an37740_driver_reference_embeddings.csv
+__pycache__/
+*.pyc
