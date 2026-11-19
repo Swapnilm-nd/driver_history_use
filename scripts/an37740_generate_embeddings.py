@@ -47,6 +47,15 @@ def load_sample(csv_path):
 
 
 def main(csv_path, out_path, device):
+    # frs_src/arcface_utils/get_nets.py loads its weights via a hardcoded relative path
+    # ("./models/arcface/mtcnn/pnet.npy"), so the process's cwd must be the FaceRecognition
+    # repo root for that to resolve. Resolve our own paths to absolute first, since they're
+    # relative to wherever this script was invoked from (driver_history_use), not to
+    # FaceRecognition - otherwise the chdir below would silently break them.
+    csv_path = os.path.abspath(csv_path)
+    out_path = os.path.abspath(out_path)
+    os.chdir(FACE_RECOGNITION_REPO_ROOT)
+
     rows = load_sample(csv_path)
     logger.info("loaded %s sample rows from %s", len(rows), csv_path)
 
