@@ -8,24 +8,28 @@ embedding-generation script, this can run anywhere the three inputs below are pr
 Inputs:
   --embeddings_pkl  one or more pickle files from an37740_generate_embeddings.py
                      (image_id, tenant_id, vehicle_id, face_s3_path, embedding)
-  --candidates_csv  data/AN-37740/step_2/an37740_candidate_drivers_filtered.csv
-                     (tenant_id, vehicle_id, driver_id, images)
-  --reference_csv   data/AN-37740/step_2/an37740_driver_reference_embeddings.csv
-                     (driver_id, embedding) - Postgres array literal format, e.g. "{0.1,0.2,...}"
+  --candidates_csv  (tenant_id, vehicle_id, driver_id) - which drivers are candidates for
+                     which vehicle
+  --reference_csv   (driver_id, cluster_id, embedding) - ONE ROW PER CLUSTER, not per driver.
+                     A driver with multiple clusters has multiple rows here - per the ticket's
+                     "candidates' cluster embeddings" (plural), every cluster of a candidate
+                     driver is compared, not just one representative embedding per driver.
+                     embedding is a Postgres array literal, e.g. "{0.1,0.2,...}"
 
 Output: a CSV - one row per image that had a real embedding (detection didn't fail) AND had
 at least one candidate driver for its vehicle: image_id, tenant_id, vehicle_id,
-num_candidates, best_driver_id, best_similarity (cosine).
+num_candidate_drivers, num_clusters_compared, best_driver_id, best_cluster_id,
+best_similarity (cosine, the best across every cluster of every candidate).
 
 Similarity metric: cosine similarity, matching cfg.ARCFACE.cosine_similarity_threshold (0.53)
 in frs_src/config.py - "the current value" the ticket's threshold sweep starts from.
 
 Run:
     python scripts/an37740_compare_embeddings.py \
-        --embeddings_pkl data/AN-37740/step_1/an37740_embeddings_drp1.pkl data/AN-37740/step_1/an37740_embeddings_drp2.pkl data/AN-37740/step_1/an37740_embeddings_drp4.pkl data/AN-37740/step_1/an37740_embeddings_drp5.pkl \
-        --candidates_csv data/AN-37740/step_2/an37740_candidate_drivers_filtered.csv \
-        --reference_csv data/AN-37740/step_2/an37740_driver_reference_embeddings.csv \
-        --out data/AN-37740/step_2/an37740_best_match_per_image.csv
+        --embeddings_pkl data/AN-37740/step_1/an37740_embeddings_drp2_200vehicles.pkl \
+        --candidates_csv data/AN-37740/step_1/an37740_drp2_200v_candidate_drivers.csv \
+        --reference_csv db_embeddings/an37740_drp2_200v_reference_embeddings.csv \
+        --out data/AN-37740/step_2/an37740_best_match_drp2_200v.csv
 """
 import csv
 import pickle
@@ -66,14 +70,21 @@ def load_candidates(csv_path):
 
 
 def load_reference_embeddings(csv_path):
-    """{driver_id: np.array}"""
+    """{driver_id: [(cluster_id, np.array), ...]} - a driver with multiple clusters gets
+    multiple entries, since the ticket compares against every cluster, not one per driver."""
     references = {}
+    n_clusters = 0
     with open(csv_path) as f:
         for row in csv.DictReader(f):
             emb = parse_pg_array(row["embedding"])
             if emb is not None:
-                references[row["driver_id"]] = emb
-    logger.info("loaded reference embeddings for %s drivers", len(references))
+                references.setdefault(row["driver_id"], []).append((row["cluster_id"], emb))
+                n_clusters += 1
+    logger.info(
+        "loaded %s reference cluster embeddings for %s distinct drivers",
+        n_clusters,
+        len(references),
+    )
     return references
 
 
@@ -107,19 +118,24 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
 
         image_emb = np.array(row["embedding"], dtype=np.float32)
         best_driver_id = None
+        best_cluster_id = None
         best_similarity = None
-        n_compared = 0
+        n_candidate_drivers_with_reference = 0
+        n_clusters_compared = 0
         for driver_id in driver_ids:
-            ref_emb = references.get(driver_id)
-            if ref_emb is None:
+            driver_clusters = references.get(driver_id)
+            if not driver_clusters:
                 continue
-            n_compared += 1
-            similarity = cosine_similarity(image_emb, ref_emb)
-            if best_similarity is None or similarity > best_similarity:
-                best_similarity = similarity
-                best_driver_id = driver_id
+            n_candidate_drivers_with_reference += 1
+            for cluster_id, ref_emb in driver_clusters:
+                n_clusters_compared += 1
+                similarity = cosine_similarity(image_emb, ref_emb)
+                if best_similarity is None or similarity > best_similarity:
+                    best_similarity = similarity
+                    best_driver_id = driver_id
+                    best_cluster_id = cluster_id
 
-        if n_compared == 0:
+        if n_clusters_compared == 0:
             n_no_reference += 1
             continue
 
@@ -128,8 +144,10 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
                 "image_id": row["image_id"],
                 "tenant_id": row["tenant_id"],
                 "vehicle_id": row["vehicle_id"],
-                "num_candidates": n_compared,
+                "num_candidate_drivers": n_candidate_drivers_with_reference,
+                "num_clusters_compared": n_clusters_compared,
                 "best_driver_id": best_driver_id,
+                "best_cluster_id": best_cluster_id,
                 "best_similarity": round(best_similarity, 6),
             }
         )
@@ -141,8 +159,10 @@ def main(embeddings_pkl, candidates_csv, reference_csv, out_path):
                 "image_id",
                 "tenant_id",
                 "vehicle_id",
-                "num_candidates",
+                "num_candidate_drivers",
+                "num_clusters_compared",
                 "best_driver_id",
+                "best_cluster_id",
                 "best_similarity",
             ],
         )
